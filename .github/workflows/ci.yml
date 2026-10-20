@@ -1,0 +1,96 @@
+name: QA CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  qa:
+    name: API CLI UI and cross-layer tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout QA repository
+        uses: actions/checkout@v4
+        with:
+          path: splitledger-qa
+
+      - name: Checkout SplitLedger application
+        uses: actions/checkout@v4
+        with:
+          repository: Mera02/splitledger
+          path: splitledger
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: splitledger/frontend/package-lock.json
+
+      - name: Create application virtual environment
+        run: |
+          python -m venv splitledger/.venv
+          splitledger/.venv/bin/python -m pip install --upgrade pip
+          splitledger/.venv/bin/python -m pip install -r splitledger/backend/requirements.txt
+
+      - name: Install QA dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r splitledger-qa/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        working-directory: splitledger/frontend
+        run: npm ci
+
+      - name: Run QA suite
+        shell: bash
+        run: |
+          set -e
+
+          cd splitledger/backend
+          ../.venv/bin/python -m uvicorn app.main:app \
+            --host 127.0.0.1 \
+            --port 8000 \
+            > /tmp/backend.log 2>&1 &
+          BACKEND_PID=$!
+
+          cd ../frontend
+          npm run dev -- --host 127.0.0.1 \
+            > /tmp/frontend.log 2>&1 &
+          FRONTEND_PID=$!
+
+          trap 'kill $BACKEND_PID $FRONTEND_PID || true' EXIT
+
+          echo "Waiting for backend..."
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/api/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:8000/api/health
+
+          echo "Waiting for frontend..."
+          for i in {1..30}; do
+            if curl -fsS http://localhost:5173 > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://localhost:5173 > /dev/null
+
+          cd ../../splitledger-qa
+          python -m pytest -v
